@@ -131,17 +131,26 @@ impl M4AInfo {
 
                 let depends_on_core = bs.read_bool()?;
 
-                if depends_on_core {
+                // Some encoders (for example, the one used for Audible audiobooks) set
+                // dependsOnCoreCoder but end the config without the coreCoderDelay that should
+                // follow. Other decoders read the missing bits as zeros, so do the same and treat
+                // the rest of the GASpecificConfig as absent instead of failing.
+                let truncated = depends_on_core && bs.bits_left() < 14 + 1;
+
+                if depends_on_core && !truncated {
                     let _delay = bs.read_bits_leq32(14)?;
                 }
 
-                let extension_flag = bs.read_bool()?;
+                let extension_flag = !truncated && bs.read_bool()?;
 
                 if self.channels == 0 {
                     return unsupported_error("aac: program config element");
                 }
 
-                if (self.otype == M4AType::Scalable) || (self.otype == M4AType::ER_AAC_Scalable) {
+                if !truncated
+                    && ((self.otype == M4AType::Scalable)
+                        || (self.otype == M4AType::ER_AAC_Scalable))
+                {
                     let _layer = bs.read_bits_leq32(3)?;
                 }
 
@@ -502,5 +511,33 @@ impl Decoder for AacDecoder {
 
     fn last_decoded(&self) -> AudioBufferRef<'_> {
         self.buf.as_audio_buffer_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_lc_config() {
+        // AAC-LC, 44.1 kHz, mono, no core coder.
+        let mut info = M4AInfo::new();
+        info.read(&[0x12, 0x08]).unwrap();
+        assert_eq!(info.otype, M4AType::Lc);
+        assert_eq!(info.srate, 44100);
+        assert_eq!(info.channels, 1);
+        assert_eq!(info.samples, 1024);
+    }
+
+    #[test]
+    fn read_lc_config_missing_core_coder_delay() {
+        // AAC-LC, 44.1 kHz, stereo, with dependsOnCoreCoder set but no coreCoderDelay, as found
+        // in Audible audiobooks.
+        let mut info = M4AInfo::new();
+        info.read(&[0x12, 0x12]).unwrap();
+        assert_eq!(info.otype, M4AType::Lc);
+        assert_eq!(info.srate, 44100);
+        assert_eq!(info.channels, 2);
+        assert_eq!(info.samples, 1024);
     }
 }
